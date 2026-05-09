@@ -56,8 +56,6 @@ The current system demonstrates strong intent but suffers from fragmentation and
 | Scalability | ❌ Poor | ⚠️ Moderate | ✅ Designed for multi-repo scale |
 | Decision system | ❌ None | ❌ None | ✅ Central orchestration layer |
 | Extensibility | ❌ Hard | ⚠️ Moderate | ✅ Feature flags + versioning |
-| Safety | ❌ Limited | ⚠️ Some improvements | ✅ Explicit permission + validation model |
-| Testability | ❌ None | ⚠️ Partial — logic in JS but env untestable | ✅ Fully unit testable |
 
 ---
 
