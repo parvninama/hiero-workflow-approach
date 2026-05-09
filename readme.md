@@ -118,12 +118,12 @@ inputs:
 The calling workflow passes them explicitly:
 
 ```yaml
-- uses: hiero-org/recommend-action@v1
+- uses: hiero-org/hiero-automation-actions/actions/on-pr-close@v1
   with:
-    repo: ${{ github.event.repository.name }}
-    owner: ${{ github.repository_owner }}
+    repo:      ${{ github.event.repository.name }}
+    owner:     ${{ github.repository_owner }}
     pr-number: ${{ github.event.pull_request.number }}
-    username: ${{ github.event.pull_request.user.login }}
+    username:  ${{ github.event.pull_request.user.login }}
 ```
 
 And inside the action, inputs are read cleanly via `core.getInput()`:
@@ -151,13 +151,64 @@ jest.mock('@actions/core', () => ({
 This is especially critical for workflows running on `pull_request_target`, which carries elevated permissions. Being able to fully unit test logic before it reaches a real repository isn't just convenient — it's a safety requirement.
 
 Additional benefits:
-- `uses: hiero-org/recommend-action@v1` — one fix propagates to all repositories automatically
+- One fix in the action repo propagates to all repositories automatically
 - Repositories can pin to `@v1` and upgrade to `@v2` deliberately — no surprise breaking changes
 - Logic complexity (loops, error handling, conditional branching, API calls) belongs in JS, not YAML
 
 ✅ Fully unit testable without a live GitHub environment  
 ✅ Reusable across repositories via versioned references  
 ✅ Safe to iterate — breaking changes don't silently affect all repos
+
+**Action Repository Structure (Monorepo)**
+
+All actions are bundled into a single repository — `hiero-automation-actions`. This avoids duplicating shared logic and tests across multiple repos, keeps versioning consistent, and means one PR covers changes to any action:
+
+```
+hiero-automation-actions/
+├── package.json                  # Shared dev dependencies
+│
+├── actions/                      # One folder per action
+│   ├── on-pr-close/
+│   │   ├── action.yml            # Input declarations
+│   │   ├── src/
+│   │   │   └── index.js          # Entry point — reads inputs, calls logic
+│   │   └── dist/
+│   │       └── index.js          # Bundled output (via ncc) — what GitHub runs
+│   │
+│   ├── on-pr-update/
+│   │   ├── action.yml
+│   │   ├── src/index.js
+│   │   └── dist/index.js
+│   │
+│   └── on-issue-comment/
+│       ├── action.yml
+│       ├── src/index.js
+│       └── dist/index.js
+│
+├── src/                          # Shared logic — used by all actions
+│   ├── logic/
+│   │   ├── recommend-issues.js
+│   │   ├── label-normalizer.js
+│   │   └── comment-builder.js
+│   └── helpers/
+│       ├── constants.js
+│       └── github-client.js
+│
+└── tests/                        # Shared test suite
+    ├── recommend-issues.test.js
+    ├── label-normalizer.test.js
+    └── helpers/
+        └── mock-factory.js
+```
+
+Each action is referenced by its subfolder path — GitHub supports this natively:
+
+```yaml
+- uses: hiero-org/hiero-automation-actions/actions/on-pr-close@v1
+- uses: hiero-org/hiero-automation-actions/actions/on-pr-update@v1
+```
+
+Since all actions share a version tag, they evolve together — which is appropriate here given they share the same logic layer and config system.
 
 ---
 
@@ -194,7 +245,7 @@ The V1 C++ setup already made the right call — writing logic in modular, pure 
 
 ### What Moves Without Changing
 
-All pure logic functions are completely reusable as-is. These functions don't know anything about how they're called — they take inputs and return outputs. They move directly into the standalone action with zero changes:
+All pure logic functions are completely reusable as-is. These functions don't know anything about how they're called — they take inputs and return outputs. They move directly into `src/logic/` in the monorepo with zero changes:
 
 - Progression and eligibility logic
 - Issue recommendation and grouping logic
@@ -204,31 +255,32 @@ All pure logic functions are completely reusable as-is. These functions don't kn
 
 ### What Changes
 
-Only the **entry point** changes. Instead of receiving an injected `github` and `context` object from `github-script`, the action reads clean, declared inputs via `core.getInput()` and constructs what it needs explicitly. The business logic underneath is untouched.
+Only the **entry point** changes. Instead of receiving an injected `github` and `context` object from `github-script`, each action reads clean, declared inputs via `core.getInput()` and constructs what it needs explicitly. The business logic underneath is untouched.
 
 ```
 V1 Structure                        V2 Structure
-─────────────────────────────────   ─────────────────────────────────
+─────────────────────────────────   ──────────────────────────────────────
 .github/
   scripts/
-    helpers/          ──────────▶   reuse entirely
-    bot/
-      logic modules   ──────────▶   reuse entirely
-    tests/            ──────────▶   reuse entirely
-    entry-point.js    ──────────▶   replace with core.getInput() reads
-                                    + action.yml input declarations
+    helpers/          ──────────▶   hiero-automation-actions/src/helpers/
+    logic modules     ──────────▶   hiero-automation-actions/src/logic/
+    tests/            ──────────▶   hiero-automation-actions/tests/
+    entry-point.js    ──────────▶   hiero-automation-actions/actions/
+                                      <event>/src/index.js
+                                    (core.getInput() + action.yml)
 ```
 
 ### Migration Path Per Workflow
 
-1. Extract the entry point into a standalone action repository
+1. Add a new folder under `actions/` in the monorepo
 2. Define inputs explicitly in `action.yml`
-3. Replace `context.*` and `payload.*` reads with `core.getInput()` calls
-4. Copy all logic modules and tests — no changes needed
-5. Update the calling workflow to pass inputs via `with:`
-6. Run existing test suite — should pass without modification
+3. Write `index.js` — replace `context.*` reads with `core.getInput()` calls
+4. Move logic modules into `src/logic/` — no changes needed
+5. Move tests into `tests/` — no changes needed
+6. Update the calling workflow to use the monorepo path via `with:`
+7. Run existing test suite — should pass without modification
 
-This means the first workflow migration serves as the template for all subsequent ones, and the cost drops significantly with each iteration.
+The first migration establishes the pattern. Every subsequent workflow follows the same steps with decreasing effort.
 
 ---
 
@@ -243,14 +295,19 @@ PR merged
 
 **2. Workflow triggers**
 ```yaml
-- uses: hiero-org/recommend-action@v1
+- uses: hiero-org/hiero-automation-actions/actions/on-pr-close@v1
+  with:
+    owner:     ${{ github.repository_owner }}
+    repo:      ${{ github.event.repository.name }}
+    pr-number: ${{ github.event.pull_request.number }}
+    username:  ${{ github.event.pull_request.user.login }}
 ```
 
 **3. JS Action collects context**
 ```js
 const payload = {
-  user: "parv",
-  repo: "hiero-sdk-python",
+  user:           core.getInput('username'),
+  repo:           core.getInput('repo'),
   completedIssue: "beginner"
 };
 ```
@@ -299,7 +356,7 @@ version: 1
 workflows:
   /assign:
     enabled: true
-    
+
   issue-recommendation:
     enabled: true
     max_recommendations: 5
@@ -412,7 +469,7 @@ const context = {
 
 // V2 — mocking declared inputs only
 jest.mock('@actions/core', () => ({
-  getInput: (name) => ({ 'pr-number': '1', 'username': 'alice' }[name])
+  getInput: (name) => ({ 'pr-number': '1', 'username': 'parv' }[name])
 }));
 ```
 
@@ -448,16 +505,17 @@ Scalability here is not about handling high traffic — GitHub Actions manages t
 | Concern | Approach |
 |---|---|
 | Adding a new repository | Add `.hiero/automation.yml` — no code changes |
-| Adding a new workflow type | Add a new rule to the rule engine + config flag |
+| Adding a new workflow type | Add a new action folder in the monorepo + config flag |
 | Different rules per repository | Handled entirely by config — same codebase |
 | Rolling out changes safely | Feature flags + versioned actions (`@v1`, `@v2`) |
-| Fixing a bug | Fix once in the action repo — all repos get it automatically |
+| Fixing a bug | Fix once in the monorepo — all repos get it automatically |
 
 ---
 
 ## 11. Versioning & Rollout Strategy
 
 - Versioned JavaScript actions (`@v1`, `@v2`) — repositories pin to a version and upgrade deliberately
+- All actions in the monorepo share a version tag — they evolve together
 - Config versioning for safe schema migration
 - Feature flags for gradual per-repository rollout
 - Backward compatibility maintained for at least one prior version
@@ -468,6 +526,6 @@ Scalability here is not about handling high traffic — GitHub Actions manages t
 
 This approach aims to eliminate duplicated logic, improve consistency across repositories, and enable scalable and configurable automation — while ensuring safety, auditability, and maintainability.
 
-The V1 C++ setup demonstrated that moving logic into modular JS was the right direction. The gap it left — inline scripts tightly coupled to the runner context, which can't be fully tested, versioned, or reused without manual copying — is exactly what this architecture addresses. Because the existing logic is already written as pure JS functions, the migration path is low-cost: reuse everything, replace only the entry point.
+The V1 C++ setup demonstrated that moving logic into modular JS was the right direction. The gap it left — inline scripts tightly coupled to the runner context, which can't be fully tested, versioned, or reused without manual copying — is exactly what this architecture addresses. Because the existing logic is already written as pure JS functions, the migration path is low-cost: reuse everything, replace only the entry point, bundle all actions into a single monorepo.
 
 The focus is not only on automation, but on designing a reliable, extensible system that supports contributor growth and reduces maintainer overhead across the Hiero ecosystem.
