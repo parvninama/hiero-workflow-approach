@@ -1,5 +1,7 @@
 # Hiero Workflow Automation – Design Approach
 
+> This document was prepared as part of my application for the [LFX Mentorship Program](https://lfx.linuxfoundation.org/tools/mentorship/) under the [Hiero](https://github.com/hiero-ledger) project (LFDT). It outlines my proposed architecture and intended approach for the mentorship [project](https://github.com/LF-Decentralized-Trust-Mentorships/mentorship-program/issues/73).
+
 ## 1. Overview
 
 This document proposes a scalable, secure, and reusable architecture for maintainer workflow automation across Hiero repositories.
@@ -18,11 +20,12 @@ The current system demonstrates strong intent but suffers from fragmentation and
 
 ### V1 – C++ SDK Workflows
 - Improved modular structure and separation of concerns
-- Better organization of helper logic
+- Uses `actions/github-script` to run JS files inline via `require()`
 - However:
-  - Tightly coupled to repository-specific configurations
+  - Scripts live inside the same repository under `.github/scripts/`
+  - Tightly coupled to repository-specific constants and config
   - Inconsistent label formats (`skill: beginner` vs `beginner`)
-  - Limited portability across repositories
+  - Limited portability — every new repo must copy the entire scripts folder
 
 ---
 
@@ -34,7 +37,8 @@ The current system demonstrates strong intent but suffers from fragmentation and
 | Inconsistent label formats | Progression logic breaks silently |
 | Tight coupling to repo config | Cannot reuse across repositories |
 | No centralized decision-making | Behavior diverges across repos over time |
-| Poor portability | Each new repo requires rebuilding from scratch |
+| Poor portability | Each new repo requires manual adaptation |
+| Inline JS via `github-script` | Cannot fully unit test GitHub environment behavior |
 
 ---
 
@@ -53,19 +57,21 @@ The current system demonstrates strong intent but suffers from fragmentation and
 | Decision system | ❌ None | ❌ None | ✅ Central orchestration layer |
 | Extensibility | ❌ Hard | ⚠️ Moderate | ✅ Feature flags + versioning |
 | Safety | ❌ Limited | ⚠️ Some improvements | ✅ Explicit permission + validation model |
+| Testability | ❌ None | ⚠️ Partial — logic in JS but env untestable | ✅ Fully unit testable |
 
 ---
 
 ## 4. Proposed Architecture
 
-### High-Level Design
+### Key Design Principle
 
-The system is structured into four logical layers:
+> Separate **"when something runs"** from **"what should happen"**
 
-1. **Trigger Layer** — GitHub Actions
-2. **Execution Layer** — Reusable JavaScript Actions
-3. **Orchestration Layer** — GitHub App
-4. **Rule Engine** — Centralized Logic
+| Layer | Role |
+|---|---|
+| GitHub Actions | Trigger events only — no business logic |
+| JavaScript Actions | Execute operations — reusable, versioned |
+| GitHub App | Decide behavior — centralized logic and config |
 
 ---
 
@@ -81,16 +87,77 @@ The system is structured into four logical layers:
 
 ---
 
-### 4.2 Execution Layer (Reusable JavaScript Actions)
+### 4.2 Execution Layer (Standalone JavaScript Actions)
 
-**Responsibility: Standardized Execution Units**
+**Responsibility: Standardized, Reusable Execution Units**
 
-- Encapsulates reusable logic as JavaScript actions
-- Handles data collection, API interactions, and applying decisions
+This is a deliberate architectural choice over the V1 approach of inline JS via `actions/github-script`.
 
-✅ Reusable across repositories  
-✅ Versioned and maintainable  
-✅ Removes duplication from workflows
+**Why standalone JS Actions over composite actions with inline JS:**
+
+The V1 C++ setup uses `github-script` to `require()` scripts from `.github/scripts/`. This works for a single repo but has a fundamental limitation — the script receives `github` and `context` objects injected by the GitHub Actions runner at runtime. You cannot fully replicate that environment locally. Finding a bug means pushing to a branch, triggering a real event, waiting for the runner, reading logs, and repeating.
+
+With standalone JS Actions, inputs are explicitly defined in `action.yml` as typed, named parameters:
+
+```yaml
+inputs:
+  repo:
+    description: 'Repository name'
+    required: true
+  owner:
+    description: 'Repository owner'
+    required: true
+  pr-number:
+    description: 'Pull request number'
+    required: true
+  username:
+    description: 'PR author login'
+    required: true
+```
+
+The calling workflow passes them explicitly:
+
+```yaml
+- uses: hiero-org/recommend-action@v1
+  with:
+    repo: ${{ github.event.repository.name }}
+    owner: ${{ github.repository_owner }}
+    pr-number: ${{ github.event.pull_request.number }}
+    username: ${{ github.event.pull_request.user.login }}
+```
+
+And inside the action, inputs are read cleanly via `core.getInput()`:
+
+```js
+const repo     = core.getInput('repo');
+const owner    = core.getInput('owner');
+const prNumber = core.getInput('pr-number');
+const username = core.getInput('username');
+```
+
+There is no ambient `context` object with runner-injected fields. The mock surface in tests shrinks to exactly what you declared — nothing more:
+
+```js
+jest.mock('@actions/core', () => ({
+  getInput: (name) => ({
+    'repo':      'hiero-sdk-python',
+    'owner':     'hiero-ledger',
+    'pr-number': '42',
+    'username':  'parv'
+  }[name])
+}));
+```
+
+This is especially critical for workflows running on `pull_request_target`, which carries elevated permissions. Being able to fully unit test logic before it reaches a real repository isn't just convenient — it's a safety requirement.
+
+Additional benefits:
+- `uses: hiero-org/recommend-action@v1` — one fix propagates to all repositories automatically
+- Repositories can pin to `@v1` and upgrade to `@v2` deliberately — no surprise breaking changes
+- Logic complexity (loops, error handling, conditional branching, API calls) belongs in JS, not YAML
+
+✅ Fully unit testable without a live GitHub environment  
+✅ Reusable across repositories via versioned references  
+✅ Safe to iterate — breaking changes don't silently affect all repos
 
 ---
 
@@ -100,9 +167,9 @@ The system is structured into four logical layers:
 
 - Receives structured inputs from actions
 - Loads repository-specific configuration
-- Determines which rules apply and what outcome should be produced
+- Determines which rules apply and what outcome to produce
 
-This replaces scattered and duplicated logic currently embedded in workflows.
+This replaces scattered and duplicated logic currently embedded in per-repository scripts.
 
 ---
 
@@ -113,24 +180,59 @@ This replaces scattered and duplicated logic currently embedded in workflows.
 - Contributor progression logic
 - Issue recommendation logic
 - Assignment eligibility checks
+- Label normalization
 
-Key principle: decisions are based on contributor history, not just last action. Shared logic is applied consistently across repositories.
-
----
-
-### Key Design Principle
-
-> Separate **"when something runs"** from **"what should happen"**
-
-| Layer | Role |
-|---|---|
-| GitHub Actions | Trigger events |
-| JavaScript Actions | Execute operations |
-| GitHub App | Decide behavior |
+Key principle: decisions are based on contributor history, not just the last action. Shared logic is applied consistently across all repositories.
 
 ---
 
-## 5. End-to-End Flow
+## 5. Migration Strategy
+
+### Why Migration Cost Is Low
+
+The V1 C++ setup already made the right call — writing logic in modular, pure JavaScript functions rather than embedding it in YAML. This means the migration to standalone JS Actions is a **restructuring exercise, not a rewrite**.
+
+### What Moves Without Changing
+
+All pure logic functions are completely reusable as-is. These functions don't know anything about how they're called — they take inputs and return outputs. They move directly into the standalone action with zero changes:
+
+- Progression and eligibility logic
+- Issue recommendation and grouping logic
+- Label normalization
+- Comment building functions
+- The existing test suite — since tests already mock at the function level, they work identically in the new structure
+
+### What Changes
+
+Only the **entry point** changes. Instead of receiving an injected `github` and `context` object from `github-script`, the action reads clean, declared inputs via `core.getInput()` and constructs what it needs explicitly. The business logic underneath is untouched.
+
+```
+V1 Structure                        V2 Structure
+─────────────────────────────────   ─────────────────────────────────
+.github/
+  scripts/
+    helpers/          ──────────▶   reuse entirely
+    bot/
+      logic modules   ──────────▶   reuse entirely
+    tests/            ──────────▶   reuse entirely
+    entry-point.js    ──────────▶   replace with core.getInput() reads
+                                    + action.yml input declarations
+```
+
+### Migration Path Per Workflow
+
+1. Extract the entry point into a standalone action repository
+2. Define inputs explicitly in `action.yml`
+3. Replace `context.*` and `payload.*` reads with `core.getInput()` calls
+4. Copy all logic modules and tests — no changes needed
+5. Update the calling workflow to pass inputs via `with:`
+6. Run existing test suite — should pass without modification
+
+This means the first workflow migration serves as the template for all subsequent ones, and the cost drops significantly with each iteration.
+
+---
+
+## 6. End-to-End Flow
 
 ### Step-by-step: PR Merged → Issue Recommendation
 
@@ -141,14 +243,14 @@ PR merged
 
 **2. Workflow triggers**
 ```yaml
-- uses: your-org/recommend-action@v1
+- uses: hiero-org/recommend-action@v1
 ```
 
-**3. JS Action collects data**
+**3. JS Action collects context**
 ```js
 const payload = {
   user: "parv",
-  repo: "hiero-sdk-cpp",
+  repo: "hiero-sdk-python",
   completedIssue: "beginner"
 };
 ```
@@ -165,11 +267,7 @@ await fetch("https://your-app.com/recommend", {
 ```js
 function recommend(userData) {
   const progress = getUserProgress(userData.user);
-
-  if (eligibleForIntermediate(progress)) {
-    return "intermediate";
-  }
-
+  if (eligibleForIntermediate(progress)) return "intermediate";
   return "beginner";
 }
 ```
@@ -189,27 +287,7 @@ postComment(result.issues);
 
 ---
 
-### What the App Actually Does
-
-The GitHub App is the central logic engine. Your existing logic moves here:
-
-- Progression rules
-- Eligibility checks
-- Fallback logic
-- Label normalization
-- Repository config loading
-
-This makes the logic reusable across every repository that opts in — no duplication, no drift.
-
----
-
-## 6. Configuration System
-
-### Goals
-
-- Repository-specific customization
-- No code changes required
-- Consistent behavior across repositories
+## 7. Configuration System
 
 ### Proposed Config Schema
 
@@ -219,19 +297,12 @@ Each repository opts in by adding `.hiero/automation.yml`:
 version: 1
 
 workflows:
+  /assign:
+    enabled: true
+    
   issue-recommendation:
     enabled: true
     max_recommendations: 5
-
-  pr-draft-explainer:
-    enabled: true
-
-  ready-for-review-reminder:
-    enabled: true
-    reminder_after_days: 3
-
-  contributor-onboarding:
-    enabled: false
 
 progression:
   thresholds:
@@ -249,6 +320,12 @@ labels:
     - from: "good first issue"
       to: "good-first-issue"
 
+  status:
+    ready_for_dev: "status: ready for dev"
+    in_progress: "status: in progress"
+    blocked: "status: blocked"
+    awaiting_triage: "status: awaiting triage"
+
 notifications:
   maintainer_team: "@hiero-ledger/maintainers"
 ```
@@ -262,15 +339,13 @@ notifications:
 
 ### Label Normalization
 
-All incoming labels are normalized internally before any logic runs:
-
 ```
 "skill: beginner"  ──┐
 "beginner"         ──┼──▶  normalized: "beginner"
 "Beginner"         ──┘
 ```
 
-This ensures progression logic never breaks due to label format inconsistency.
+Normalization happens before any logic runs, so progression rules never break due to label format differences between repositories.
 
 ### Config Versioning
 
@@ -281,7 +356,7 @@ This ensures progression logic never breaks due to label format inconsistency.
 
 ---
 
-## 7. Safety & Permissions
+## 8. Safety & Permissions
 
 ### Key Risks
 
@@ -290,27 +365,26 @@ This ensures progression logic never breaks due to label format inconsistency.
 | Malicious PRs from forks | High | Never use `pull_request` for sensitive ops; use `pull_request_target` carefully |
 | Workflow injection via PR body | High | Never interpolate PR body into `run:` steps; validate all inputs |
 | Excessive token permissions | Medium | Request only required scopes per workflow |
-| Unintended automation on wrong repos | Medium | Explicit opt-in via config file; no implicit behavior |
+| Unintended automation on wrong repos | Medium | Explicit opt-in via config; no implicit behavior |
 | Bot actions not traceable | Low | Log all decisions with reasoning |
 
 ### Proposed Safeguards
 
 - **Minimal GitHub token permissions** — each workflow requests only the scopes it needs
-- **Careful use of `pull_request_target`** — sensitive operations only run after trust verification
+- **Careful use of `pull_request_target`** — sensitive operations only run after trust verification; especially important given the elevated permissions this event carries
 - **Input validation** — all external inputs sanitized before use; never passed to shell commands
-- **Explicit opt-in** — app never acts on repositories that haven't opted in
-- **Permission boundaries** — clearly defined what the app is and is not allowed to do
+- **Explicit opt-in** — app never acts on repositories that haven't added a config file
+- **Full unit test coverage before deployment** — the inability to predict the GitHub environment with inline JS is exactly why standalone actions with mockable inputs are the right approach here
 
 ### Audit & Transparency
 
 - All decisions logged with timestamp, repository, event, rule applied, and outcome
 - Bot comments include a brief explanation of why an action was taken
-- Maintainers can inspect decision logs to understand or override any automated action
 - All automated actions are attributable to a specific config version
 
 ---
 
-## 8. Testing Strategy
+## 9. Testing Strategy
 
 ### Layers of Testing
 
@@ -318,11 +392,31 @@ This ensures progression logic never breaks due to label format inconsistency.
 
 Test progression logic, label normalization, and recommendation selection in isolation. No GitHub API calls required.
 
+With standalone JS Actions, the mock surface is exactly the declared inputs — nothing more. There is no ambient runner context to reconstruct, no event payload shape to get right. Each input is a named, typed value that tests control precisely:
+
+```js
+// V1 — manually reconstructing runner context
+const context = {
+  eventName: 'pull_request',
+  repo: { owner: 'test-owner', repo: 'test-repo' },
+  payload: {
+    pull_request: {
+      number: 1,
+      user: { login: 'parv', type: 'User' },
+      body: 'Fixes #42',
+      labels: [],
+      assignees: [],
+    },
+  },
+};
+
+// V2 — mocking declared inputs only
+jest.mock('@actions/core', () => ({
+  getInput: (name) => ({ 'pr-number': '1', 'username': 'alice' }[name])
+}));
 ```
-getNextLevel('beginner')          → 'intermediate'
-getFallbackLevel('beginner')      → 'good-first-issue'
-normalizeLabel('skill: beginner') → 'beginner'
-```
+
+The V1 approach requires knowing the exact structure of the GitHub Actions runtime context for every event type. The V2 approach requires knowing only what you declared. This makes tests smaller, more reliable, and immune to changes in GitHub's event payload structure.
 
 **Integration Tests — GitHub App**
 - Dedicated test GitHub organization with real repositories
@@ -341,17 +435,15 @@ normalizeLabel('skill: beginner') → 'beginner'
 
 ### CI Pipeline
 
-All tests run on every PR via GitHub Actions before merge. Unit tests run first as a fast gate — if they fail, integration tests are skipped.
+All tests run on every PR before merge. Unit tests run first as a fast gate — if they fail, integration tests are skipped.
 
 ---
 
-## 9. Scalability
+## 10. Scalability
 
 ### What Scalability Means for This System
 
-Scalability here is not about handling high traffic — GitHub Actions already manages that. It means: **can a new repository adopt this system in under an hour, with zero changes to shared code?**
-
-### How the Architecture Achieves This
+Scalability here is not about handling high traffic — GitHub Actions manages that. It means: **can a new repository adopt this system in under an hour, with zero changes to shared code?**
 
 | Concern | Approach |
 |---|---|
@@ -359,65 +451,23 @@ Scalability here is not about handling high traffic — GitHub Actions already m
 | Adding a new workflow type | Add a new rule to the rule engine + config flag |
 | Different rules per repository | Handled entirely by config — same codebase |
 | Rolling out changes safely | Feature flags + versioned actions (`@v1`, `@v2`) |
-| Onboarding new maintainers | Config file is the single source of truth |
-
-### Adoption Path for New Repositories
-
-```
-1. Repository adds .hiero/automation.yml
-2. Enables only the workflows it needs
-3. Customises thresholds and label mappings
-4. GitHub App begins processing events immediately
-5. Maintainer monitors initial runs via decision logs
-6. Gradually enables additional workflows as confidence grows
-```
-
----
-
-## 10. Execution Plan
-
-### Phase 1 — Orient & Audit (Weeks 1–2)
-- Study existing V0 and V1 workflow implementations in detail
-- Map all current behaviors, edge cases, and known gaps
-- Align architecture proposal with mentor feedback
-- Identify the first workflow to implement end-to-end
-- Set up local development environment and test GitHub organization
-
-### Phase 2 — Build First Workflow End-to-End (Weeks 3–7)
-- Implement the full four-layer stack for one workflow (likely issue recommendation, since it already has a working prototype)
-- Establish the config schema and opt-in mechanism
-- Write unit and integration tests covering core logic and safety constraints
-- Deploy to one repository, monitor, and iterate based on real behavior
-
-### Phase 3 — Harden & Extend (Weeks 8–12)
-- Implement remaining high-value workflows
-- Harden safety constraints and audit logging
-- Write documentation for maintainers and contributors
-- Test adoption across a second repository with different config needs
-- Produce recommendations for future extensions
+| Fixing a bug | Fix once in the action repo — all repos get it automatically |
 
 ---
 
 ## 11. Versioning & Rollout Strategy
 
-### Feature Flags
-- Enable/disable features per repository
-- Gradual rollout of new functionality
-
-### Versioned Actions & Configs
-- Versioned JavaScript actions (`@v1`, `@v2`)
-- Config versioning for safe migration
-- Backward compatibility across repositories
+- Versioned JavaScript actions (`@v1`, `@v2`) — repositories pin to a version and upgrade deliberately
+- Config versioning for safe schema migration
+- Feature flags for gradual per-repository rollout
+- Backward compatibility maintained for at least one prior version
 
 ---
 
 ## 12. Summary
 
-This approach aims to:
+This approach aims to eliminate duplicated logic, improve consistency across repositories, and enable scalable and configurable automation — while ensuring safety, auditability, and maintainability.
 
-- Eliminate duplicated logic
-- Improve consistency across repositories
-- Enable scalable and configurable automation
-- Ensure safety, auditability, and maintainability
+The V1 C++ setup demonstrated that moving logic into modular JS was the right direction. The gap it left — inline scripts tightly coupled to the runner context, which can't be fully tested, versioned, or reused without manual copying — is exactly what this architecture addresses. Because the existing logic is already written as pure JS functions, the migration path is low-cost: reuse everything, replace only the entry point.
 
 The focus is not only on automation, but on designing a reliable, extensible system that supports contributor growth and reduces maintainer overhead across the Hiero ecosystem.
