@@ -24,7 +24,7 @@ The current system demonstrates strong intent but suffers from fragmentation and
 - However:
   - Scripts live inside the same repository under `.github/scripts/`
   - Tightly coupled to repository-specific constants and config
-  - Inconsistent label formats (`skill: beginner` vs `beginner`)
+  - Hardcoded labels
   - Limited portability — every new repo must copy the entire scripts folder
 
 ---
@@ -52,7 +52,7 @@ The current system demonstrates strong intent but suffers from fragmentation and
 | Logic reuse | ❌ Duplicated across files | ⚠️ Improved but still scattered | ✅ Centralized rule engine |
 | Config handling | ❌ Hardcoded / implicit | ⚠️ Repo-specific configs | ✅ Standardized config system |
 | Portability | ❌ Not reusable | ⚠️ Limited portability | ✅ Cross-repo compatible |
-| Label handling | ❌ Inconsistent | ❌ Still inconsistent | ✅ Normalized labels |
+| Label handling | ❌ Hardcoded | ❌ Hardcoded | ✅ Normalized labels |
 | Scalability | ❌ Poor | ⚠️ Moderate | ✅ Designed for multi-repo scale |
 | Decision system | ❌ None | ❌ None | ✅ Central orchestration layer |
 | Extensibility | ❌ Hard | ⚠️ Moderate | ✅ Feature flags + versioning |
